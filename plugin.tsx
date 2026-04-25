@@ -58,34 +58,103 @@ async function fetchNpmInfo(pkgName: string): Promise<NpmRegistryResult | null> 
 
 // ─── Кэш: чтение версий ──────────────────────────────────────────────────────
 
-function specToPkgName(spec: string): string {
-  const scoped = spec.match(/^(@[^/]+\/[^@]+)/);
-  if (scoped) return scoped[1];
-  const plain = spec.match(/^([^@]+)/);
-  if (plain) return plain[1];
-  return spec;
+/**
+ * Определяет формат спека:
+ *  - scoped npm:  @scope/pkg  или  @scope/pkg@ver
+ *  - github:      owner/repo  или  owner/repo@ver  (ровно один слэш, не начинается с @)
+ *  - plain npm:   pkg         или  pkg@ver
+ *  - local:       /abs или ./rel  → пропускаем
+ */
+type SpecKind = "scoped" | "github" | "plain" | "local";
+
+function classifySpec(spec: string): SpecKind {
+  if (spec.startsWith("/") || spec.startsWith(".")) return "local";
+  if (spec.startsWith("@")) return "scoped";
+  // github: owner/repo — ровно один слэш
+  if (/^[^@/]+\/[^@/]+(?:@.*)?$/.test(spec)) return "github";
+  return "plain";
 }
 
-function specToSlug(spec: string): string {
-  if (spec.startsWith("/") || spec.startsWith(".")) return "";
-  const scoped = spec.match(/^(@[^/]+\/[^@]+)(?:@(.+))?$/);
-  if (scoped) return `${scoped[1]}@${scoped[2] ?? "latest"}`;
-  const plain = spec.match(/^([^@]+)(?:@(.+))?$/);
-  if (plain) return `${plain[1]}@${plain[2] ?? "latest"}`;
-  return spec;
+/**
+ * Реальное имя npm-пакета из спека.
+ * Для github-спека (owner/repo) имя пакета неизвестно заранее —
+ * вернём пустую строку, чтобы читать его из package.json пакета напрямую.
+ */
+function specToPkgName(spec: string): string {
+  const kind = classifySpec(spec);
+  if (kind === "scoped") {
+    const m = spec.match(/^(@[^/]+\/[^@]+)/);
+    return m ? m[1] : spec;
+  }
+  if (kind === "github") return ""; // узнаем из package.json пакета
+  if (kind === "plain") {
+    const m = spec.match(/^([^@]+)/);
+    return m ? m[1] : spec;
+  }
+  return "";
+}
+
+/**
+ * Директория в кэше OpenCode для данного спека.
+ * npm (scoped/plain): <name>@<ver|latest>
+ * github (owner/repo[@ver]): owner/repo  (OpenCode не добавляет @latest)
+ */
+function specToCacheDir(spec: string): string {
+  const kind = classifySpec(spec);
+  if (kind === "local") return "";
+
+  if (kind === "github") {
+    // owner/repo  или  owner/repo@ver → берём только owner/repo
+    const m = spec.match(/^([^@/]+\/[^@/]+)/);
+    return m ? m[1] : "";
+  }
+
+  // scoped или plain
+  const pkgName = specToPkgName(spec);
+  const verMatch = spec.match(/@([^@]+)$/);
+  const ver = verMatch ? verMatch[1] : "latest";
+  return `${pkgName}@${ver}`;
+}
+
+interface PkgJson {
+  name?: string;
+  version?: string;
+  dependencies?: Record<string, string>;
 }
 
 function resolveVersionFromCache(spec: string): string {
-  const slug = specToSlug(spec);
-  if (!slug) return "?";
-  const pkgName = specToPkgName(spec);
+  const cacheDir = specToCacheDir(spec);
+  if (!cacheDir) return "?";
+
   const cacheBase = nodePath.join(os.homedir(), ".cache", "opencode", "packages");
-  const candidates = [slug];
-  if (!slug.endsWith("@latest")) candidates.push(`${pkgName}@latest`);
+  const kind = classifySpec(spec);
+
+  if (kind === "github") {
+    // Для github-пакетов читаем напрямую из node_modules внутри кэша.
+    // Имя пакета берём из package.json самого кэш-пакета (dependencies).
+    const wrapperPkgPath = nodePath.join(cacheBase, cacheDir, "package.json");
+    try {
+      const wrapper = JSON.parse(fs.readFileSync(wrapperPkgPath, "utf8")) as PkgJson;
+      const depNames = Object.keys(wrapper.dependencies ?? {});
+      for (const depName of depNames) {
+        const depPkgPath = nodePath.join(cacheBase, cacheDir, "node_modules", depName, "package.json");
+        try {
+          const dep = JSON.parse(fs.readFileSync(depPkgPath, "utf8")) as PkgJson;
+          if (dep.version) return dep.version;
+        } catch { /* пробуем следующий */ }
+      }
+    } catch { /* нет кэша */ }
+    return "?";
+  }
+
+  // npm-пакет: читаем из dependencies wrapper-package.json
+  const pkgName = specToPkgName(spec);
+  const candidates = [cacheDir];
+  if (!cacheDir.endsWith("@latest")) candidates.push(`${pkgName}@latest`);
   for (const candidate of candidates) {
     try {
       const raw = fs.readFileSync(nodePath.join(cacheBase, candidate, "package.json"), "utf8");
-      const root = JSON.parse(raw) as RootPackageJson;
+      const root = JSON.parse(raw) as PkgJson;
       const ver = root.dependencies?.[pkgName];
       if (ver) return ver;
     } catch { /* пробуем следующий */ }
@@ -126,12 +195,13 @@ function buildPluginList(
     if (seen.has(p.spec)) continue;
     seen.add(p.spec);
     result.push({
-      name: p.spec,
+      // p.id — это реальное имя пакета из plugin.id, p.spec — спек из tui.json (может быть owner/repo)
+      name: p.id ?? p.spec,
       version: resolveVersionFromCache(p.spec),
       spec: p.spec,
       source: "npm",
       id: p.id,
-      enabled: p.active,  // active = реально работает в рантайме; enabled = разрешён конфигом
+      enabled: p.active,
     });
   }
 
@@ -148,7 +218,22 @@ function buildPluginList(
   for (const cfgPath of [...new Set(serverConfigs)]) {
     for (const raw of readPluginsFromJsonc(cfgPath)) {
       if (raw.startsWith("/") || raw.startsWith(".")) continue;
-      const pkgName = specToPkgName(raw);
+      let pkgName = specToPkgName(raw);
+      // Для github-спека (owner/repo) имя пакета неизвестно из спека —
+      // пробуем прочитать его из package.json в кэше
+      if (!pkgName) {
+        const cacheDir = specToCacheDir(raw);
+        if (!cacheDir) continue;
+        const cacheBase = nodePath.join(os.homedir(), ".cache", "opencode", "packages");
+        try {
+          const wrapper = JSON.parse(
+            fs.readFileSync(nodePath.join(cacheBase, cacheDir, "package.json"), "utf8")
+          ) as PkgJson;
+          pkgName = Object.keys(wrapper.dependencies ?? {})[0] ?? raw;
+        } catch {
+          pkgName = raw;
+        }
+      }
       if (seen.has(pkgName)) continue;
       seen.add(pkgName);
       result.push({
@@ -395,6 +480,10 @@ const tui: TuiPlugin = async (api) => {
 
   refresh();
 
+  // Повторный refresh через 1 с — к этому моменту все плагины уже инициализированы
+  // и api.plugins.list() вернёт полный список
+  const refreshTimer = setTimeout(refresh, 1000);
+
   // ── Slash-команда /plugin-manage ─────────────────────────────────────────
   const unregisterCommand = api.command.register(() => [
     {
@@ -472,6 +561,7 @@ const tui: TuiPlugin = async (api) => {
   });
 
   api.lifecycle.onDispose(() => {
+    clearTimeout(refreshTimer);
     unregisterCommand();
   });
 };
