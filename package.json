@@ -1,5 +1,5 @@
 {
-  "name": "opencode-plugins-sidebar",
+  "name": "opencode-plugins-manager",
   "version": "1.0.0",
   "description": "OpenCode TUI plugin that shows loaded plugins and their versions in the sidebar",
   "main": "./plugin.tsx",
@@ -11,7 +11,7 @@
     "opencode",
     "opencode-plugin",
     "opencode-tui-plugin",
-    "sidebar",
+    "manager",
     "plugins"
   ],
   "license": "MIT",

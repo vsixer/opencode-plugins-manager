@@ -111,7 +111,7 @@ function readPluginsFromJsonc(configPath: string): string[] {
 
 // ─── Сбор плагинов ───────────────────────────────────────────────────────────
 
-const SELF_ID = "opencode-plugins-sidebar";
+const SELF_ID = "opencode-plugins-manager";
 
 function buildPluginList(
   tuiStatuses: ReadonlyArray<TuiPluginStatus>,
