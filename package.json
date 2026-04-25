@@ -1,0 +1,23 @@
+{
+  "name": "opencode-plugins-sidebar",
+  "version": "1.0.0",
+  "description": "OpenCode TUI plugin that shows loaded plugins and their versions in the sidebar",
+  "main": "./plugin.tsx",
+  "exports": {
+    "./tui": "./plugin.tsx"
+  },
+  "oc-plugin": ["tui"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-tui-plugin",
+    "sidebar",
+    "plugins"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opentui/solid": "*",
+    "solid-js": "*"
+  }
+}
