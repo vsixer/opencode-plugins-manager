@@ -22,7 +22,7 @@ interface PluginInfo {
   name: string;
   version: string;
   spec: string;
-  source: "npm" | "server";
+  source: "npm" | "file" | "server";
   id: string | null;
   /** true = плагин активен в рантайме (active), false = деактивирован */
   enabled: boolean;
@@ -122,7 +122,23 @@ interface PkgJson {
   dependencies?: Record<string, string>;
 }
 
+function resolveVersionFromFile(spec: string): string {
+  // spec — либо file:///abs/path, либо /abs/path, либо ./rel/path
+  try {
+    const dir = spec.startsWith("file://") ? spec.slice("file://".length) : spec;
+    const raw = fs.readFileSync(nodePath.join(dir, "package.json"), "utf8");
+    const pkg = JSON.parse(raw) as PkgJson;
+    return pkg.version ?? "?";
+  } catch {
+    return "?";
+  }
+}
+
 function resolveVersionFromCache(spec: string): string {
+  if (spec.startsWith("file://") || spec.startsWith("/") || spec.startsWith(".")) {
+    return resolveVersionFromFile(spec);
+  }
+
   const cacheDir = specToCacheDir(spec);
   if (!cacheDir) return "?";
 
@@ -191,15 +207,15 @@ function buildPluginList(
   const result: PluginInfo[] = [];
 
   for (const p of tuiStatuses) {
-    if (p.source === "internal" || p.source === "file" || p.id === SELF_ID) continue;
+    if (p.source === "internal" || p.id === SELF_ID) continue;
     if (seen.has(p.spec)) continue;
     seen.add(p.spec);
     result.push({
-      // p.id — это реальное имя пакета из plugin.id, p.spec — спек из tui.json (может быть owner/repo)
+      // p.id — реальное имя пакета; p.spec — спек из tui.json (owner/repo, file://, @scope/pkg и т.д.)
       name: p.id ?? p.spec,
       version: resolveVersionFromCache(p.spec),
       spec: p.spec,
-      source: "npm",
+      source: p.source === "file" ? "file" : "npm",
       id: p.id,
       enabled: p.active,
     });
